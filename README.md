@@ -14,10 +14,15 @@ Fedora packaging of [grub-btrfs](https://github.com/Antynea/grub-btrfs), built f
 >    `41_snapshots-btrfs` aborts with `Cannot determine UUID` and no snapshot
 >    submenu is generated.
 > 2. **Switching from `make install`:** the package takes over the unowned files.
->    `/etc/default/grub-btrfs/config` is a `%config(noreplace)` file, so a differing
->    existing config is kept aside as `config.rpmorig` or `config.rpmnew` — back it up
->    first and reconcile afterwards.
-> 3. **The COPR API token expires** (see `expiration` in `~/.config/copr`). Once it does,
+>    `/etc/default/grub-btrfs/config` is a `%config(noreplace)` file: an existing,
+>    differing config stays in place and the packaged one lands in `config.rpmnew`, so
+>    `rpm -V` reports the config as modified. Back it up first, then reconcile (usually
+>    only `GRUB_BTRFS_VERSION` differs) and replace it with the `.rpmnew`.
+> 3. **Check the unit is enabled after switching.** Releases before `-2` lacked a preset,
+>    so `%systemd_post` applied Fedora's default preset and removed an existing
+>    `grub-btrfsd.service` enablement. `-2` ships `80-grub-btrfs.preset`; after an install of
+>    `-1`, run `systemctl enable grub-btrfsd.service`.
+> 4. **The COPR API token expires** (see `expiration` in `~/.config/copr`). Once it does,
 >    the daily workflow fails at the COPR step; renew it at
 >    <https://copr.fedorainfracloud.org/api/> and update the `COPR_CONFIG` secret.
 
@@ -26,7 +31,7 @@ Fedora packaging of [grub-btrfs](https://github.com/Antynea/grub-btrfs), built f
 ```bash
 sudo dnf copr enable mkocustos/grub-btrfs
 sudo dnf install grub-btrfs
-sudo systemctl enable --now grub-btrfsd.service
+sudo systemctl start grub-btrfsd.service   # enabled by the package preset
 sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
 
@@ -37,6 +42,7 @@ Chroots: Fedora 43 and 44 (the package is `noarch`).
 - Sets the Fedora paths in `/etc/default/grub-btrfs/config`:
   `GRUB_BTRFS_GRUB_DIRNAME="/boot/grub2"` and `GRUB_BTRFS_SCRIPT_CHECK=grub2-script-check`.
   Nothing else — in particular no snapshot kernel parameters, so boot behaviour is upstream's.
+- Ships `80-grub-btrfs.preset` so `grub-btrfsd.service` is enabled on install.
 - Removes the root check from the Makefile install target (the build runs unprivileged).
 - `%check` fails the build if the multi-device fix (`| head -n1` for root and boot device)
   disappears from `41_snapshots-btrfs`, or if either script has a syntax error.

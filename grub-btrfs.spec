@@ -14,7 +14,7 @@
 
 Name:           grub-btrfs
 Version:        %{baseversion}^%{commitdate}git%{shortcommit}
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Include btrfs snapshots in GRUB boot options
 
 License:        GPL-3.0-or-later
@@ -73,6 +73,13 @@ sed -i '/test "$(shell id -u)" != 0/,/^[[:space:]]*fi$/d' Makefile
 make install DESTDIR=%{buildroot} PREFIX=%{_prefix} \
     SYSTEMD=true OPENRC=false INITCPIO=false GRUB_UPDATE_EXCLUDE=true
 
+# Fedora's default preset disables unknown units, and %systemd_post applies it
+# on first install. Without this, installing over a make-install setup removes
+# the existing enablement and the daemon silently stops after the next reboot.
+install -Dm644 /dev/stdin %{buildroot}%{_presetdir}/80-grub-btrfs.preset <<'PRESET'
+enable grub-btrfsd.service
+PRESET
+
 %check
 # Regression guard for multi-device Btrfs (upstream PR #440): grub2-probe
 # prints one line per device, and without head -n1 the UUID lookup comes back
@@ -102,10 +109,14 @@ bash -n %{buildroot}%{_bindir}/grub-btrfsd
 %{_sysconfdir}/grub.d/41_snapshots-btrfs
 %{_bindir}/grub-btrfsd
 %{_unitdir}/grub-btrfsd.service
+%{_presetdir}/80-grub-btrfs.preset
 %{_mandir}/man8/grub-btrfs.8*
 %{_mandir}/man8/grub-btrfsd.8*
 
 %changelog
+* Thu Sep 17 2026 Michael Köster <github.com@koester-familie.de> - 4.14^20260824git38cd2fa-2
+- Ship a preset that enables grub-btrfsd.service; the default preset disabled it on install
+
 # Versions are generated per upstream commit; see the git history of
 # https://github.com/mkocustos/grub-btrfs-rpm for packaging changes.
 * Thu Sep 17 2026 Michael Köster <github.com@koester-familie.de> - 4.14^20260824git38cd2fa-1
