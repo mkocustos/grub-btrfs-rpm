@@ -1,0 +1,155 @@
+name: copr
+
+# Builds grub-btrfs from the tip of upstream master into a COPR project.
+#
+# Upstream master carries fixes that are not in any release yet (multi-device
+# Btrfs, Antynea/grub-btrfs#440), and every existing COPR packages a release
+# tarball. The daily run only builds when upstream moved, so the COPR history
+# stays one build per upstream commit.
+#
+# Required repository configuration:
+#   secret   COPR_CONFIG    - contents of ~/.config/copr (https://copr.fedorainfracloud.org/api/)
+#   variable COPR_REPO_NAME - e.g. 'myfasuser/grub-btrfs'
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Upstream commit to build. Empty: tip of master."
+        default: ""
+        type: string
+      force:
+        description: "Build even if this commit was already built."
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM: Antynea/grub-btrfs
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+      commitdate: ${{ steps.resolve.outputs.commitdate }}
+      should-build: ${{ steps.guard.outputs.should-build }}
+    steps:
+      - name: Verify the COPR project is configured
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COPR_REPO_NAME}" ] || [ -z "${COPR_CONFIG}" ]; then
+            echo "ERROR: variable COPR_REPO_NAME or secret COPR_CONFIG is not set" >&2
+            exit 1
+          fi
+          echo "COPR project: ${COPR_REPO_NAME}"
+
+      - name: Resolve the upstream commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          ref="${INPUT_COMMIT:-master}"
+          # The API resolves branch names and short SHAs alike and returns the
+          # committer date, which becomes part of the package version.
+          read -r commit date < <(gh api "repos/${UPSTREAM}/commits/${ref}" \
+            --jq '.sha + " " + .commit.committer.date')
+          commitdate="$(date -u -d "${date}" +%Y%m%d)"
+          echo "Upstream ${ref} -> ${commit} (${commitdate})"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "commitdate=${commitdate}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip commits that were already built
+        id: guard
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+          COMMIT: ${{ steps.resolve.outputs.commit }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ "${FORCE}" = "true" ]; then
+            echo "should-build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          pipx install copr-cli >/dev/null
+          mkdir -p ~/.config && printf '%s\n' "${COPR_CONFIG}" > ~/.config/copr
+          # A missing package (first run) is not an error, it simply needs a build.
+          version="$(copr-cli get-package "${COPR_REPO_NAME}" --name grub-btrfs \
+                       --with-latest-succeeded-build 2>/dev/null \
+                     | jq -r '.latest_succeeded_build.source_package.version // empty' || true)"
+          echo "Latest succeeded build: ${version:-none}"
+          if [[ "${version}" == *"git${COMMIT:0:7}-"* ]]; then
+            echo "Commit ${COMMIT:0:7} is already built, nothing to do."
+            echo "should-build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should-build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: setup
+    if: needs.setup.outputs.should-build == 'true'
+    runs-on: ubuntu-24.04
+    container: registry.fedoraproject.org/fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the source RPM
+        env:
+          COMMIT: ${{ needs.setup.outputs.commit }}
+          COMMITDATE: ${{ needs.setup.outputs.commitdate }}
+        run: |
+          set -euo pipefail
+          dnf -y -q install rpm-build rpmdevtools systemd-rpm-macros
+          mkdir -p srpm
+          defines=(--define "commit ${COMMIT}" --define "commitdate ${COMMITDATE}")
+          spectool -g -C srpm "${defines[@]}" grub-btrfs.spec
+          rpmbuild -bs grub-btrfs.spec "${defines[@]}" \
+            --define "_sourcedir ${PWD}/srpm" --define "_srcrpmdir ${PWD}/srpm"
+
+      - name: Build in COPR
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+        run: |
+          set -euo pipefail
+          dnf -y -q install copr-cli
+          mkdir -p ~/.config && printf '%s\n' "${COPR_CONFIG}" > ~/.config/copr
+          # copr-cli waits for the build and exits non-zero if any chroot fails.
+          copr-cli build "${COPR_REPO_NAME}" srpm/*.src.rpm
+
+  verify:
+    needs: [setup, build]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: ["43", "44"]
+    container: registry.fedoraproject.org/fedora:${{ matrix.fedora }}
+    steps:
+      - name: Install from COPR and check the package
+        env:
+          COPR_REPO_NAME: ${{ vars.COPR_REPO_NAME }}
+          COMMIT: ${{ needs.setup.outputs.commit }}
+        run: |
+          set -euo pipefail
+          dnf -y -q install dnf5-plugins
+          dnf -y -q copr enable "${COPR_REPO_NAME}"
+          dnf -y -q --refresh install grub-btrfs
+          version="$(rpm -q --qf '%{VERSION}' grub-btrfs)"
+          echo "Installed grub-btrfs ${version}"
+          if [[ "${version}" != *"git${COMMIT:0:7}" ]]; then
+            echo "ERROR: expected a build of ${COMMIT:0:7}, got ${version}" >&2
+            exit 1
+          fi
+          rpm -V grub-btrfs
+          grep -q -- '--target=device / | head -n1' /etc/grub.d/41_snapshots-btrfs
+          grep -q '^GRUB_BTRFS_GRUB_DIRNAME="/boot/grub2"' /etc/default/grub-btrfs/config
