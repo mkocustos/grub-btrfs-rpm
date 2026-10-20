@@ -35,7 +35,7 @@ sudo systemctl start grub-btrfsd.service   # enabled by the package preset
 sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
 
-Chroots: Fedora 43 and 44 (the package is `noarch`).
+Chroots: Fedora 44 (the package is `noarch`). Fedora 43 was dropped on 2026-10-20 after the host upgrade.
 
 ## What the package changes
 
@@ -60,7 +60,7 @@ supersedes these builds without an epoch.
 1. **setup** resolves the tip of upstream master and skips the run if the latest succeeded
    COPR build already carries that commit.
 2. **build** creates the SRPM in a Fedora container and submits it to COPR.
-3. **verify** installs the fresh build in `fedora:43` and `fedora:44`, checks the version
+3. **verify** installs the fresh build in `fedora:44`, checks the version
    matches the commit, runs `rpm -V` and checks the fix is present.
 
 Manual runs (`workflow_dispatch`) accept a specific upstream `commit` and `force`.
